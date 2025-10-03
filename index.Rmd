@@ -1,0 +1,323 @@
+---
+title: "Artists Collaboration Genre Analysis"
+author: "Luca Boffo - 889058"
+date: "2025-05-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(igraph)
+library(ggraph)
+library(tidygraph)
+library(ggplot2)
+library(RColorBrewer)
+```
+
+
+### Raccolta ed Analisi dei Dati
+
+```{r}
+data <- read.csv("data/spotify_data.csv")
+
+collab_artists <- data[grepl(";", data$artists), ]
+single_artists <- data[!grepl(";", data$artists), ] 
+
+# Divide gli artisti in liste
+collab_artists <- collab_artists %>% mutate(artists = strsplit(as.character(artists), ";"))
+```
+
+
+### Elaborazione dei Dati
+
+```{r}
+# Crea coppie solo se ci sono almeno 2 artisti nella lista
+edges <- collab_artists %>%
+  filter(lengths(artists) > 1) %>%  # Esclude righe con un solo artista
+  mutate(pairs = lapply(artists, function(x) if (length(x) > 1) combn(x, 2, simplify = FALSE) else list())) %>%
+  select(pairs) %>%
+  unnest(pairs)
+
+
+# Converte le coppie in un DataFrame
+collab_df <- as.data.frame(do.call(rbind, edges$pairs))
+colnames(collab_df) <- c("from", "to")
+
+# Conta quante volte ogni coppia ha collaborato
+collab_df <- collab_df %>%
+  count(from, to, name = "num_collab")
+
+
+artists_genre_df <- collab_artists %>%
+  unnest(artists)  # Divide in righe separate
+
+artists_genre_df <- artists_genre_df %>%
+  mutate(artists = trimws(artists))
+
+artists_genre_df <- artists_genre_df %>%
+  count(artists, track_genre)
+
+# Assegna all'artista un singolo genere musicale, ovvero il più frequente
+artists_genre_df <- artists_genre_df %>%
+  group_by(artists) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%  # Prende il genere più frequente
+  ungroup() %>%
+  select(artists, track_genre)  # Mantiene solo le colonne richieste
+
+```
+
+#### Grafo Completo Semplice
+
+```{r}
+# Crea un grafo da collab_df
+gCollab <- graph_from_data_frame(collab_df, directed = FALSE)
+
+# Imposta il layout del grafo
+layout <- create_layout(gCollab, layout = "fr") # Fruchterman-Reingold
+
+
+ggplot(layout, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_edge_link(aes(alpha = num_collab, width = num_collab), color = "grey50") +
+  geom_node_point(aes(size = degree(gCollab)), shape = 21, fill = "lightblue", color = "black", stroke = 1) +
+  scale_edge_alpha_continuous(name = "Numero di Collaborazioni") +
+  scale_edge_width_continuous(guide = "none") +
+  scale_size_continuous(name = "Numero di Canzoni", range = c(3, 10)) +
+  guides(
+    edge_alpha = "none",
+    edge_width = "none"
+  ) +
+  theme_graph() +
+  labs(title = "Rete di Collaborazioni tra Artisti")
+```
+### Analisi delle Componenti Connesse
+
+```{r}
+# Prende le componenti connesse del grafo generale
+components_info <- components(gCollab)
+component_sizes <- components_info$csize
+
+# Aggiungi l'ID della componente come attributo dei nodi
+V(gCollab)$component_id <- components_info$membership
+
+
+num_components <- components_info$no
+print(paste("Numero totale di componenti connesse:", num_components))
+
+max_component_size <- max(component_sizes)
+print(paste("Dimensione della componente più grande:", max_component_size))
+
+total_nodes <- vcount(gCollab)
+print(paste("Numero totale di artisti nel grafo:", total_nodes))
+
+# Percentuale di artisti nella componente più grande
+percent_in_max_component <- (max_component_size / total_nodes) * 100
+print(paste("Percentuale di artisti nella componente più grande:", round(percent_in_max_component, 2), "%"))
+
+```
+
+### Aggiungo i colori per il genere musicale
+
+```{r}
+# Crea la mappa artista -> genere
+artist_genre_map <- setNames(artists_genre_df$track_genre, artists_genre_df$artists)
+
+# Aggiungere il genere ai nodi del grafo
+V(gCollab)$genre <- artist_genre_map[V(gCollab)$name]
+
+# Conta i generi nei nodi del grafo
+genre_counts <- table(V(gCollab)$genre)
+
+# Top 10 generi per frequenza
+top_10_genres <- names(sort(genre_counts, decreasing = TRUE)[1:10])
+
+# Crea il gruppo "Other", ovvero tutti gli altri non presenti nei top 10 generi
+V(gCollab)$genre_grouped <- ifelse(V(gCollab)$genre %in% top_10_genres, V(gCollab)$genre, "Other")
+
+# Ordina i generi in modo decrescente in base al numero di nodi appartenenti al genere
+genre_grouped_counts <- sort(table(V(gCollab)$genre_grouped), decreasing = TRUE)
+ordered_genres <- c(setdiff(names(genre_grouped_counts), "Other"), "Other")
+
+# Crea quello da scrivere sulla leggenda
+genre_labels <- paste0(ordered_genres, " (", genre_grouped_counts[ordered_genres], ")")
+names(genre_labels) <- ordered_genres 
+V(gCollab)$genre_grouped <- factor(V(gCollab)$genre_grouped, levels = ordered_genres)
+
+# Palette di colori: 10 per i top, il grigio indica tutte le tracce fuori dalla top 10
+palette_colors <- c(
+  "#E57373", "#F06292", "#BA68C8", "#9575CD", "#7986CB",
+  "#64B5F6", "#4DB6AC", "#81C784", "#DCE775", "#FFD54F",
+  "gray50"
+)
+names(palette_colors) <- ordered_genres 
+V(gCollab)$color <- palette_colors[V(gCollab)$genre_grouped]
+```
+
+#### Grafo con l'informazione dei generi musicali
+
+```{r}
+
+layout <- create_layout(gCollab, layout = "fr")
+
+ggraph(layout) +
+  geom_edge_link(aes(alpha = num_collab, width = num_collab), edge_colour = "grey80") +
+  geom_node_point(aes(fill = genre_grouped, size = degree(gCollab)), shape = 21, color = "black", stroke = 0.5) +
+  scale_fill_manual(name = "Genere Musicale", values = palette_colors, labels = genre_labels) +
+  scale_edge_alpha_continuous(name = "Collaborazioni") +
+  scale_size_continuous(range = c(3, 10)) +
+  guides(
+    size = "none",      
+    alpha = "none",     
+    width = "none",     
+    edge_alpha = "none",
+    edge_width = "none",
+    fill = guide_legend(title = "Genere Musicale")  
+  ) +
+  theme_graph() +
+  labs(title = "Rete di Collaborazioni tra Artisti")
+
+```
+
+### Eliminazione tracce non nella top 10 generi
+
+```{r}
+# Lista generi da mantenere (top 10)
+keep_genres <- setdiff(ordered_genres, "Other")
+
+# Toglie i nodi di gCollab "Other"
+gCollab_filtered <- induced_subgraph(gCollab, vids = V(gCollab)[genre_grouped %in% keep_genres])
+V(gCollab_filtered)$genre_grouped <- factor(V(gCollab_filtered)$genre_grouped, levels = keep_genres)
+```
+
+#### Grafo con l'informazione dei top 10 generi musicali
+
+```{r}
+layout_filtered <- create_layout(gCollab_filtered, layout = "fr")
+
+ggraph(layout_filtered) +
+  geom_edge_link(aes(alpha = num_collab, width = num_collab), edge_colour = "grey80") +
+  geom_node_point(aes(fill = genre_grouped, size = degree(gCollab_filtered)), shape = 21, color = "black", stroke = 0.5) +
+  scale_fill_manual(name = "Genere Musicale", values = palette_colors[keep_genres], labels = genre_labels) +
+  scale_edge_alpha_continuous(name = "Collaborazioni") +
+  scale_size_continuous(range = c(3, 10)) +
+  guides(
+    size = "none",     
+    alpha = "none",     
+    width = "none",     
+    edge_alpha = "none",
+    edge_width = "none",
+    fill = guide_legend(title = "Genere Musicale")  
+  ) +
+  theme_graph() +
+  labs(title = "Rete di Collaborazioni tra Artisti (Top 10 generi)")
+
+```
+
+### Analisi della componente più grande
+
+```{r}
+# Identifico la componente connessa più grande
+largest_component_id <- which.max(components(gCollab_filtered)$csize)
+V(gCollab_filtered)$component_id <- components(gCollab_filtered)$membership
+gCollab_largest_component <- induced_subgraph(gCollab_filtered, vids = V(gCollab_filtered)[component_id == largest_component_id])
+
+# Conto il numero di nodi per genere
+genre_counts_largest <- table(V(gCollab_largest_component)$genre_grouped)
+ordered_genres_largest <- names(sort(genre_counts_largest, decreasing = TRUE))
+
+# Scrivo la leggenda per il grafo della componente connessa
+genre_labels_largest <- paste0(ordered_genres_largest, " (", genre_counts_largest[ordered_genres_largest], ")")
+names(genre_labels_largest) <- ordered_genres_largest
+```
+
+#### Grafo della componente connessa più grande
+
+```{r}
+layout_largest_component <- create_layout(gCollab_largest_component, layout = "fr")
+
+ggraph(layout_largest_component) +
+  geom_edge_link(aes(alpha = num_collab, width = num_collab), edge_colour = "grey80") +
+  geom_node_point(aes(fill = genre_grouped, size = degree(gCollab_largest_component)), shape = 21, color = "black", stroke = 0.5) +
+  scale_fill_manual(
+    name = "Genere Musicale",
+    values = palette_colors[ordered_genres_largest], 
+    labels = genre_labels_largest[ordered_genres_largest], 
+    breaks = ordered_genres_largest 
+  ) +
+  scale_edge_alpha_continuous(name = "Collaborazioni") +
+  scale_size_continuous(range = c(3, 10)) +
+  guides(
+    size = "none",
+    alpha = "none",
+    width = "none",
+    edge_alpha = "none",
+    edge_width = "none",
+    fill = guide_legend(title = "Genere Musicale", order = 1) 
+  ) +
+  theme_graph() +
+  labs(title = "Componente più grande (Top 10 generi)")
+```
+
+## Analisi del grado di Centralità e Betwenness
+
+```{r}
+# Grado di centralità
+V(gCollab_largest_component)$degree_centrality <- degree(gCollab_largest_component)
+
+# Betwenness
+V(gCollab_largest_component)$betweenness_centrality <- betweenness(gCollab_largest_component, normalized = FALSE)
+
+
+# Creo un dataframe in cui inserisco i risultati
+centrality_df <- data.frame(
+  Artist = V(gCollab_largest_component)$name,
+  Genre = V(gCollab_largest_component)$genre_grouped,
+  Degree = V(gCollab_largest_component)$degree_centrality,
+  Betweenness = V(gCollab_largest_component)$betweenness_centrality
+)
+
+print(centrality_df %>% arrange(desc(Degree)) %>% head(10))
+```
+
+#### Grafico a barre del grado di centralità
+
+```{r}
+centrality_df %>%
+  arrange(desc(Degree)) %>%
+  head(20) %>%
+  ggplot(aes(x = reorder(Artist, Degree), y = Degree, fill = Genre)) + 
+  geom_col() +
+  scale_fill_manual(values = palette_colors, labels = genre_labels_largest) + 
+  coord_flip() + 
+  labs(title = "Top 20 Artisti per Centralità di Grado",
+       x = "Artista",
+       y = "Centralità di Grado",
+       fill = "Genere Musicale") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+#### Grafico a barre per la betwenness
+
+```{r}
+centrality_df %>%
+  arrange(desc(Betweenness)) %>%
+  head(20) %>%
+  ggplot(aes(x = reorder(Artist, Betweenness), y = Betweenness, fill = Genre)) + 
+  geom_col() +
+  scale_fill_manual(values = palette_colors, labels = genre_labels_largest) + 
+  coord_flip() + 
+  labs(title = "Top 20 Artisti per Betwenness",
+       x = "Artista",
+       y = "Betwenness",
+       fill = "Genere Musicale") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
