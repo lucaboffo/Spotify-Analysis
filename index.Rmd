@@ -24,7 +24,7 @@ library(RColorBrewer)
 ### Raccolta ed Analisi dei Dati
 
 ```{r}
-data <- read.csv("data/spotify_data.csv")
+data <- read.csv("spotify_data.csv")
 
 collab_artists <- data[grepl(";", data$artists), ]
 single_artists <- data[!grepl(";", data$artists), ] 
